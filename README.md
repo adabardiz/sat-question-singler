@@ -6,3 +6,5 @@ this platform where the user must upload the quiz and the answer key, and they c
 - Question Sidebar: You can skip a question or return to a question
 - It uses Gemini API to give you feedback on your mistakes
 - It isolates questions from the others to display them on your screen
+
+I would like to make this a free website/app
