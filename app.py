@@ -1,11 +1,18 @@
 import fitz
 import re
 import streamlit as st
+import google.generativeai as genai
+from PIL import Image
+import io
 
+def parse_answer_key(file_bytes):
+    text = file_bytes.decode("utf-8")
+    return re.findall(r"\b[A-D]\b", text.upper())
 
-def parse_pdf_to_questions(pdf_bytes):
+def parse_pdf_to_questions(pdf_bytes, answer_key):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     parsed_questions = []
+    q_index = 0
 
     for page_num in range(len(doc)):
         page = doc[page_num]
@@ -66,12 +73,7 @@ def parse_pdf_to_questions(pdf_bytes):
                     "D": "Option D",
                 }
 
-            correct_ans = "A"
-            ans_match = re.search(
-                r"Correct Answer:\s*(?:Choice\s*)?([A-D])", sub_text, re.IGNORECASE
-            )
-            if ans_match:
-                correct_ans = ans_match.group(1).upper()
+            correct_ans = answer_key[q_index] if q_index < len(answer_key) else "A"
 
             parsed_questions.append(
                 {
@@ -80,12 +82,14 @@ def parse_pdf_to_questions(pdf_bytes):
                     "correct_answer": correct_ans,
                 }
             )
+            q_index += 1
 
     return parsed_questions
 
-
 st.set_page_config(page_title="SAT Question Practice", layout="wide")
 st.title("Automated PDF Question Engine")
+
+api_key = st.text_input("Gemini API Key", type="password")
 
 if "questions" not in st.session_state:
     st.session_state.questions = []
@@ -95,21 +99,26 @@ if "user_answers" not in st.session_state:
     st.session_state.user_answers = {}
 if "skipped" not in st.session_state:
     st.session_state.skipped = set()
+if "explanations" not in st.session_state:
+    st.session_state.explanations = {}
 
 uploaded_file = st.file_uploader("Upload SAT or Practice Test PDF", type=["pdf"])
+answer_key_file = st.file_uploader("Upload Answer Key", type=["txt", "csv"])
 
-if uploaded_file and not st.session_state.questions:
+if uploaded_file and answer_key_file and not st.session_state.questions:
     if st.button("Process PDF & Start Quiz"):
-        with st.spinner("Processing PDF..."):
-            extracted = parse_pdf_to_questions(uploaded_file.read())
+        with st.spinner("Processing..."):
+            ans_key = parse_answer_key(answer_key_file.read())
+            extracted = parse_pdf_to_questions(uploaded_file.read(), ans_key)
             if extracted:
                 st.session_state.questions = extracted
                 st.session_state.current_q = 0
                 st.session_state.user_answers = {}
                 st.session_state.skipped = set()
+                st.session_state.explanations = {}
                 st.rerun()
             else:
-                st.error("No valid questions found in this PDF.")
+                st.error("No valid questions found.")
 
 if st.session_state.questions:
     total = len(st.session_state.questions)
@@ -122,9 +131,9 @@ if st.session_state.questions:
         col = cols[index % 4]
         label = f"{index + 1}"
         if index in st.session_state.user_answers:
-            label = f"[x] {index + 1}"
+            label = f"[Done] {index + 1}"
         elif index in st.session_state.skipped:
-            label = f"[-] {index + 1}"
+            label = f"[Skip] {index + 1}"
 
         if col.button(label, key=f"nav_{index}"):
             st.session_state.current_q = index
@@ -155,8 +164,6 @@ if st.session_state.questions:
     if submit_btn:
         st.session_state.user_answers[curr] = user_choice
         st.session_state.skipped.discard(curr)
-        if curr < total - 1:
-            st.session_state.current_q += 1
         st.rerun()
 
     if skip_btn:
@@ -173,6 +180,17 @@ if st.session_state.questions:
     if curr in st.session_state.user_answers:
         ans = st.session_state.user_answers[curr]
         if ans == q_data["correct_answer"]:
-            st.success("Correct!")
+            st.success("Correct.")
         else:
-            st.error(f"Incorrect. Correct answer is {q_data['correct_answer'].lower()}.")
+            st.error(f"Incorrect. Correct answer is {q_data['correct_answer']}.")
+            
+            if api_key and curr not in st.session_state.explanations:
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                image = Image.open(io.BytesIO(q_data["image"]))
+                prompt = f"The user chose {ans} but the correct answer is {q_data['correct_answer']}. Briefly explain why {q_data['correct_answer']} is correct and why {ans} is wrong."
+                response = model.generate_content([prompt, image])
+                st.session_state.explanations[curr] = response.text
+            
+            if curr in st.session_state.explanations:
+                st.info(st.session_state.explanations[curr])
