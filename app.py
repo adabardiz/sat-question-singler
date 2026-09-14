@@ -7,192 +7,172 @@ def parse_pdf_to_questions(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     parsed_questions = []
 
-    for page in doc:
+    for page_num in range(len(doc)):
+        page = doc[page_num]
         text = page.get_text("text")
-        q_matches = list(
-            re.finditer(r"Question ID:\s*([a-f0-9]+)", text, re.IGNORECASE)
-        )
 
-        if q_matches:
-            q_rects = page.search_for("Question ID:")
-            for i, q_rect in enumerate(q_rects):
-                y_start = max(0, q_rect.y0 - 5)
+        q_id_rects = page.search_for("Question ID:")
+        if not q_id_rects:
+            q_id_rects = page.search_for("Question")
 
-                if i + 1 < len(q_rects):
-                    y_next = q_rects[i + 1].y0 - 5
-                else:
-                    y_next = page.rect.height
+        if not q_id_rects:
+            continue
 
-                start_pos = q_matches[i].start()
-                end_pos = (
-                    q_matches[i + 1].start()
-                    if i + 1 < len(q_matches)
-                    else len(text)
-                )
-                q_text = text[start_pos:end_pos]
+        for i, q_rect in enumerate(q_id_rects):
+            y_start = max(0, q_rect.y0 - 10)
 
-                options = {}
-                opt_matches = re.findall(
-                    r"(?:^|\n)\s*([A-D])[\.\)]\s*(.*?)(?=\n\s*[A-D][\.\)]|\nRationale|\nCorrect Answer|\nQuestion ID|$)",
-                    q_text,
-                    re.DOTALL,
-                )
-                for k, v in opt_matches:
-                    options[k.upper()] = v.strip().replace("\n", " ")
+            if i + 1 < len(q_id_rects):
+                y_next = q_id_rects[i + 1].y0 - 10
+            else:
+                y_next = page.rect.height
 
-                opt_a_rects = (
-                    page.search_for("A.")
-                    or page.search_for("A)")
-                    or page.search_for("A ")
-                )
-                y_end = y_next
-                for opt_rect in opt_a_rects:
-                    if y_start < opt_rect.y0 < y_next:
-                        y_end = opt_rect.y0 - 5
-                        break
+            cut_rects = (
+                page.search_for("Answer\n")
+                + page.search_for("Answer")
+                + page.search_for("Rationale")
+                + page.search_for("Correct Answer")
+            )
 
-                clip_rect = fitz.Rect(0, y_start, page.rect.width, y_end)
-                pix = page.get_pixmap(clip=clip_rect, dpi=180)
-                img_bytes = pix.tobytes("png")
+            y_end = y_next
+            for c_rect in cut_rects:
+                if y_start + 20 < c_rect.y0 <= y_next:
+                    y_end = min(y_end, c_rect.y0 - 5)
 
-                if len(options) < 4:
-                    options = {
-                        "A": "Option A",
-                        "B": "Option B",
-                        "C": "Option C",
-                        "D": "Option D",
-                    }
+            clip_rect = fitz.Rect(0, y_start, page.rect.width, y_end)
+            pix = page.get_pixmap(clip=clip_rect, dpi=200)
+            img_bytes = pix.tobytes("png")
 
-                correct_ans = "A"
-                ans_match = re.search(
-                    r"Correct Answer[:\s]*([A-D])", q_text, re.IGNORECASE
-                )
-                if ans_match:
-                    correct_ans = ans_match.group(1).upper()
+            sub_text = text
+            matches = list(re.finditer(r"Question ID:", text, re.IGNORECASE))
+            if len(matches) > i:
+                start_char = matches[i].start()
+                end_char = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+                sub_text = text[start_char:end_char]
 
-                parsed_questions.append(
-                    {
-                        "image": img_bytes,
-                        "options": options,
-                        "correct_answer": correct_ans,
-                        "explanation": "Review the problem steps carefully.",
-                    }
-                )
-        else:
-            if re.search(r"[A-D][\.\)]", text):
-                options = {}
-                opt_matches = re.findall(
-                    r"(?:^|\n)\s*([A-D])[\.\)]\s*(.*?)(?=\n\s*[A-D][\.\)]|\nRationale|\nCorrect Answer|$)",
-                    text,
-                    re.DOTALL,
-                )
-                for k, v in opt_matches:
-                    options[k.upper()] = v.strip().replace("\n", " ")
+            options = {}
+            opt_pattern = r"(?:^|\n)\s*([A-D])[\.\)]\s*(.*?)(?=\n\s*[A-D][\.\)]|\nRationale|\nCorrect Answer|\nAnswer|$)"
+            found_opts = re.findall(opt_pattern, sub_text, re.DOTALL)
 
-                opt_a_rects = (
-                    page.search_for("A.")
-                    or page.search_for("A)")
-                    or page.search_for("A ")
-                )
-                y_end = page.rect.height
-                if opt_a_rects:
-                    y_end = opt_a_rects[0].y0 - 5
+            for k, v in found_opts:
+                clean_v = v.strip().replace("\n", " ")
+                if clean_v:
+                    options[k.upper()] = clean_v
 
-                clip_rect = fitz.Rect(0, 0, page.rect.width, y_end)
-                pix = page.get_pixmap(clip=clip_rect, dpi=180)
-                img_bytes = pix.tobytes("png")
+            if len(options) < 4:
+                options = {
+                    "A": "Option A",
+                    "B": "Option B",
+                    "C": "Option C",
+                    "D": "Option D",
+                }
 
-                if len(options) < 4:
-                    options = {
-                        "A": "Option A",
-                        "B": "Option B",
-                        "C": "Option C",
-                        "D": "Option D",
-                    }
+            correct_ans = "A"
+            ans_match = re.search(
+                r"Correct Answer:\s*(?:Choice\s*)?([A-D])", sub_text, re.IGNORECASE
+            )
+            if ans_match:
+                correct_ans = ans_match.group(1).upper()
 
-                parsed_questions.append(
-                    {
-                        "image": img_bytes,
-                        "options": options,
-                        "correct_answer": "A",
-                        "explanation": "Review the problem steps carefully.",
-                    }
-                )
+            parsed_questions.append(
+                {
+                    "image": img_bytes,
+                    "options": options,
+                    "correct_answer": correct_ans,
+                }
+            )
 
     return parsed_questions
 
 
-st.set_page_config(page_title="PDF SAT Practice", page_icon="📝")
+st.set_page_config(page_title="SAT Question Practice", layout="wide")
 st.title("Automated PDF Question Engine")
 
 if "questions" not in st.session_state:
     st.session_state.questions = []
 if "current_q" not in st.session_state:
     st.session_state.current_q = 0
-if "score" not in st.session_state:
-    st.session_state.score = 0
-if "answered" not in st.session_state:
-    st.session_state.answered = False
+if "user_answers" not in st.session_state:
+    st.session_state.user_answers = {}
+if "skipped" not in st.session_state:
+    st.session_state.skipped = set()
 
-uploaded_file = st.file_uploader(
-    "Upload SAT or Practice Test PDF", type=["pdf"]
-)
+uploaded_file = st.file_uploader("Upload SAT or Practice Test PDF", type=["pdf"])
 
 if uploaded_file and not st.session_state.questions:
     if st.button("Process PDF & Start Quiz"):
-        with st.spinner("Clipping questions from PDF..."):
+        with st.spinner("Processing PDF..."):
             extracted = parse_pdf_to_questions(uploaded_file.read())
             if extracted:
                 st.session_state.questions = extracted
                 st.session_state.current_q = 0
-                st.session_state.score = 0
+                st.session_state.user_answers = {}
+                st.session_state.skipped = set()
                 st.rerun()
             else:
-                st.error(
-                    "Could not isolate questions. Make sure the PDF contains valid question formats."
-                )
+                st.error("No valid questions found in this PDF.")
 
 if st.session_state.questions:
-    total_q = len(st.session_state.questions)
-    curr_idx = st.session_state.current_q
-    q_data = st.session_state.questions[curr_idx]
+    total = len(st.session_state.questions)
+    curr = st.session_state.current_q
+    q_data = st.session_state.questions[curr]
 
-    st.progress((curr_idx + 1) / total_q)
-    st.caption(f"Question {curr_idx + 1} of {total_q}")
+    st.sidebar.title("Question Navigator")
+    cols = st.sidebar.columns(4)
+    for index in range(total):
+        col = cols[index % 4]
+        label = f"{index + 1}"
+        if index in st.session_state.user_answers:
+            label = f"[x] {index + 1}"
+        elif index in st.session_state.skipped:
+            label = f"[-] {index + 1}"
+
+        if col.button(label, key=f"nav_{index}"):
+            st.session_state.current_q = index
+            st.rerun()
+
+    st.progress((curr + 1) / total)
+    st.caption(f"Question {curr + 1} of {total}")
 
     st.image(q_data["image"], use_container_width=True)
 
-    with st.form(key=f"quiz_form_{curr_idx}"):
+    saved_choice = st.session_state.user_answers.get(curr, "A")
+
+    with st.form(key=f"quiz_form_{curr}"):
         user_choice = st.radio(
             "Select an option:",
             options=list(q_data["options"].keys()),
+            index=list(q_data["options"].keys()).index(saved_choice)
+            if saved_choice in q_data["options"]
+            else 0,
             format_func=lambda x: f"{x.lower()}) {q_data['options'][x]}",
         )
-        submit = st.form_submit_button("Submit Answer")
 
-    if submit:
-        st.session_state.answered = True
-        if user_choice == q_data["correct_answer"]:
+        f_col1, f_col2, f_col3 = st.columns(3)
+        submit_btn = f_col1.form_submit_button("Submit Answer")
+        skip_btn = f_col2.form_submit_button("Skip Question")
+        prev_btn = f_col3.form_submit_button("Previous Question")
+
+    if submit_btn:
+        st.session_state.user_answers[curr] = user_choice
+        st.session_state.skipped.discard(curr)
+        if curr < total - 1:
+            st.session_state.current_q += 1
+        st.rerun()
+
+    if skip_btn:
+        st.session_state.skipped.add(curr)
+        if curr < total - 1:
+            st.session_state.current_q += 1
+        st.rerun()
+
+    if prev_btn:
+        if curr > 0:
+            st.session_state.current_q -= 1
+            st.rerun()
+
+    if curr in st.session_state.user_answers:
+        ans = st.session_state.user_answers[curr]
+        if ans == q_data["correct_answer"]:
             st.success("Correct!")
-            st.session_state.score += 1
         else:
-            st.error(f"Incorrect. Your choice: {user_choice}")
-
-        st.info(f"**Explanation:** {q_data['explanation']}")
-
-    if st.session_state.answered:
-        if curr_idx < total_q - 1:
-            if st.button("Next Question"):
-                st.session_state.current_q += 1
-                st.session_state.answered = False
-                st.rerun()
-        else:
-            st.balloons()
-            st.success(
-                f"Practice Complete! Final Score: {st.session_state.score}/{total_q}"
-            )
-            if st.button("Upload Another Test"):
-                st.session_state.questions = []
-                st.session_state.current_q = 0
-                st.session_state.answered = False
-                st.rerun()
+            st.error(f"Incorrect. Correct answer is {q_data['correct_answer'].lower()}.")
